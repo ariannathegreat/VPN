@@ -5,7 +5,9 @@ Run with: python -m pytest tests/test_vpn.py -v
 """
 
 import os
+
 import sys
+
 import time
 import struct
 import unittest
