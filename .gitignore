@@ -13,8 +13,6 @@ logs/
 
 # Build artifacts
 build_pptx.py
-
-# claude code local settings
 .claude/
 
 # OS
