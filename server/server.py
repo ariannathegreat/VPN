@@ -22,6 +22,7 @@ from core.packet    import PacketEncapsulator, PacketType, VPNPacket, validate_t
 from core.session   import Session, SessionManager, SessionState
 from core.tun       import TUNInterface, DNSProtection
 from utils.logger   import setup_logging, AuditLogger
+from security.rate_limiter import HandshakeRateLimiter
 
 log = logging.getLogger("vpn.server")
 
@@ -84,6 +85,11 @@ class VPNServer:
         self._tun:     Optional[TUNInterface]  = None
         self._running: bool = False
         self._audit:   AuditLogger = AuditLogger()
+
+        # Rate limiter: prevent handshake floods and PSK brute-force
+        self._rate_limiter = HandshakeRateLimiter(
+            max_attempts=5, window_seconds=60.0, block_seconds=300.0
+        )
 
         # Active sessions: session_id → Session
         self._session_mgr = SessionManager(
@@ -187,6 +193,11 @@ class VPNServer:
     # ── Handshake: new client ──────────────────────────────────────────────────
 
     def _handle_new_client(self, data: bytes, peer: tuple) -> None:
+        # Rate-limit new handshake attempts per source IP
+        if not self._rate_limiter.allow(peer[0]):
+            self._audit.auth_fail(peer, "rate-limited")
+            return   # silently drop — do not send an error response
+
         hs = ServerHandshake(self.psk, self.cipher)
         if not hs.process_client_hello(data):
             log.warning("Bad CLIENT_HELLO from %s:%d", *peer)
@@ -367,21 +378,39 @@ def main():
     parser.add_argument("--server-ip", default="10.8.0.1",    help="Server TUN IP")
     parser.add_argument("--network",   default="10.8.0.0/24", help="VPN subnet")
     parser.add_argument("--cipher",    default=DEFAULT_CIPHER, help="Cipher suite")
+    parser.add_argument("--wan",       default=None,           help="WAN interface for NAT (e.g. eth0)")
     parser.add_argument("--debug",     action="store_true",   help="Debug logging")
     args = parser.parse_args()
 
     setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
 
-    server = VPNServer(
-        host           = args.host,
-        port           = args.port,
-        psk            = args.psk,
-        tun_name       = args.tun,
-        server_tun_ip  = args.server_ip,
-        vpn_network    = args.network,
-        cipher         = args.cipher,
-    )
-    server.start()
+    # Optional NAT firewall setup
+    firewall = None
+    if args.wan:
+        from security.firewall import ServerFirewall, detect_wan_interface
+        wan = args.wan if args.wan != "auto" else detect_wan_interface()
+        firewall = ServerFirewall(
+            wan_iface=wan, vpn_network=args.network,
+            vpn_port=args.port, tun_name=args.tun,
+        )
+        if not firewall.apply():
+            log.error("Firewall setup failed — continuing without NAT")
+            firewall = None
+
+    try:
+        server = VPNServer(
+            host           = args.host,
+            port           = args.port,
+            psk            = args.psk,
+            tun_name       = args.tun,
+            server_tun_ip  = args.server_ip,
+            vpn_network    = args.network,
+            cipher         = args.cipher,
+        )
+        server.start()
+    finally:
+        if firewall:
+            firewall.remove()
 
 
 if __name__ == "__main__":

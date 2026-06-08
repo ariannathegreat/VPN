@@ -323,9 +323,10 @@ def main():
     parser.add_argument("--local-ip",    default="10.8.0.2",     help="Local TUN IP address")
     parser.add_argument("--network",     default="10.8.0.0/24",  help="VPN subnet")
     parser.add_argument("--dns",         default="10.8.0.1",     help="VPN DNS server")
-    parser.add_argument("--full-tunnel", action="store_true",    help="Route all traffic through VPN")
-    parser.add_argument("--cipher",      default=DEFAULT_CIPHER, help="Cipher suite")
-    parser.add_argument("--debug",       action="store_true",    help="Debug logging")
+    parser.add_argument("--full-tunnel",    action="store_true", help="Route all traffic through VPN")
+    parser.add_argument("--block-dns-leak", action="store_true", help="Use iptables to block DNS on physical interface (requires root)")
+    parser.add_argument("--cipher",         default=DEFAULT_CIPHER, help="Cipher suite")
+    parser.add_argument("--debug",          action="store_true",    help="Debug logging")
     args = parser.parse_args()
 
     setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
@@ -346,7 +347,22 @@ def main():
         log.error("Failed to connect to VPN server")
         sys.exit(1)
 
-    client.run()
+    # Optional iptables DNS leak prevention (supplements resolv.conf change)
+    fw = None
+    if args.block_dns_leak:
+        from security.firewall import ClientFirewall
+        fw = ClientFirewall(
+            tun_name=args.tun,
+            server_ip=args.host,
+            server_port=args.port,
+        )
+        fw.apply()
+
+    try:
+        client.run()
+    finally:
+        if fw:
+            fw.remove()
 
 
 if __name__ == "__main__":
